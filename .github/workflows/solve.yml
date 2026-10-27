@@ -1,0 +1,43 @@
+name: solve
+on:
+  workflow_dispatch:
+    inputs:
+      instance: {description: "path to cnf", required: true}
+      seconds: {description: "solver time", default: "780"}
+      tag: {description: "run tag", required: true}
+permissions:
+  contents: write
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        run: gcc -O3 -march=native -o probsat probsat.c -lm
+      - name: run
+        run: |
+          N=$(nproc); echo "cores=$N"
+          for c in $(seq 0 $((N-1))); do
+            CB=$(python3 -c "print([4.2,4.4,4.6,4.8,5.0][(${{ matrix.job }}*$N+$c)%5])")
+            SEED=$(( ${{ matrix.job }}*1000 + c + RANDOM ))
+            (timeout $(( ${{ inputs.seconds }} + 20 )) ./probsat "${{ inputs.instance }}" $CB $SEED ${{ inputs.seconds }} > sol_$c.txt 2> log_$c.txt; echo done > done_$c) &
+          done
+          end=$(( $(date +%s) + ${{ inputs.seconds }} + 25 ))
+          while [ $(date +%s) -lt $end ]; do
+            for f in sol_*.txt; do
+              if [ -s "$f" ] && python3 verify.py "${{ inputs.instance }}" "$f"; then
+                cp "$f" solution.txt
+                git config user.name solver; git config user.email solver@users.noreply.github.com
+                B="sol-${{ inputs.tag }}-${{ matrix.job }}"
+                git checkout -b "$B"; git add solution.txt; git commit -m "solution"; git push origin "$B"
+                pkill probsat; exit 0
+              fi
+            done
+            n=$(ls done_* 2>/dev/null | wc -l); [ "$n" -ge "$N" ] && break
+            sleep 2
+          done
+          cat log_*.txt
