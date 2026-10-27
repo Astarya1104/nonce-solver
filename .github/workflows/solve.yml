@@ -2,7 +2,7 @@ name: solve
 on:
   workflow_dispatch:
     inputs:
-      instance: {description: "path to cnf", required: true}
+      instance: {description: "dir with gz parts p_*", required: true}
       seconds: {description: "solver time", default: "780"}
       tag: {description: "run tag", required: true}
 permissions:
@@ -16,6 +16,8 @@ jobs:
         job: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
     steps:
       - uses: actions/checkout@v4
+      - name: assemble
+        run: cat ${{ inputs.instance }}/p_* | gunzip > inst.cnf && head -1 inst.cnf
       - name: build
         run: gcc -O3 -march=native -o probsat probsat.c -lm
       - name: run
@@ -24,12 +26,12 @@ jobs:
           for c in $(seq 0 $((N-1))); do
             CB=$(python3 -c "print([4.2,4.4,4.6,4.8,5.0][(${{ matrix.job }}*$N+$c)%5])")
             SEED=$(( ${{ matrix.job }}*1000 + c + RANDOM ))
-            (timeout $(( ${{ inputs.seconds }} + 20 )) ./probsat "${{ inputs.instance }}" $CB $SEED ${{ inputs.seconds }} > sol_$c.txt 2> log_$c.txt; echo done > done_$c) &
+            (timeout $(( ${{ inputs.seconds }} + 20 )) ./probsat inst.cnf $CB $SEED ${{ inputs.seconds }} > sol_$c.txt 2> log_$c.txt; echo done > done_$c) &
           done
           end=$(( $(date +%s) + ${{ inputs.seconds }} + 25 ))
           while [ $(date +%s) -lt $end ]; do
             for f in sol_*.txt; do
-              if [ -s "$f" ] && python3 verify.py "${{ inputs.instance }}" "$f"; then
+              if [ -s "$f" ] && python3 verify.py inst.cnf "$f"; then
                 cp "$f" solution.txt
                 git config user.name solver; git config user.email solver@users.noreply.github.com
                 B="sol-${{ inputs.tag }}-${{ matrix.job }}"
