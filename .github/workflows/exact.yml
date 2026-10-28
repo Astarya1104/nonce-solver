@@ -25,31 +25,43 @@ jobs:
       - name: install solvers
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq kissat minisat cryptominisat
+          sudo apt-get install -y -qq cadical minisat cryptominisat || true
+          echo "--- apt results ---"
+          for b in cadical minisat cryptominisat5 cryptominisat; do
+            printf "%s: " "$b"; command -v "$b" || echo MISSING
+          done
+          if ! command -v kissat >/dev/null; then
+            curl -sL -o kissat.tar.gz https://github.com/arminbiere/kissat/archive/refs/tags/rel-4.0.2.tar.gz
+            tar xzf kissat.tar.gz && cd kissat-rel-4.0.2 && ./configure --quiet && make -j4 >/dev/null 2>&1
+            sudo cp build/kissat /usr/local/bin/kissat || true
+            cd ..
+          fi
+          echo "kissat: $(command -v kissat || echo MISSING)"
 
       - name: run
         run: |
           N=$(nproc); echo "cores=$N job=${{ matrix.job }}"
           SEC=${{ inputs.seconds }}
           J=${{ matrix.job }}
+          SOLVERS="kissat cadical cryptominisat5 minisat"
           for c in $(seq 0 $((N-1))); do
             K=$(( (J*N+c) % 4 ))
-            if [ $K -eq 0 ]; then
-              timeout $SEC kissat -q --seed=$((J*13+c)) inst.cnf > sol_$c.txt 2> log_$c.txt
-            elif [ $K -eq 1 ]; then
-              timeout $SEC cryptominisat5 --verb 0 --random-seed $((J*17+c)) inst.cnf > sol_$c.txt 2> log_$c.txt
-            elif [ $K -eq 2 ]; then
-              timeout $SEC minisat -rnd-seed=$((J*19+c)) inst.cnf sol_$c.txt > log_$c.txt 2>&1
-            else
-              timeout $SEC kissat -q --sat --seed=$((J*23+c)) inst.cnf > sol_$c.txt 2> log_$c.txt
-            fi
+            S=$(echo $SOLVERS | cut -d' ' -f$((K+1)))
+            command -v $S >/dev/null || S=kissat
+            case $S in
+              kissat)   timeout $SEC kissat -q --seed=$((J*13+c)) inst.cnf > sol_$c.txt 2> log_$c.txt ;;
+              cadical)  timeout $SEC cadical -q --seed=$((J*17+c)) inst.cnf sol_$c.txt > log_$c.txt 2>&1 ;;
+              cryptominisat5) timeout $SEC cryptominisat5 --verb 0 --random-seed $((J*19+c)) inst.cnf > sol_$c.txt 2> log_$c.txt ;;
+              minisat)  timeout $SEC minisat -rnd-seed=$((J*23+c)) inst.cnf sol_$c.txt > log_$c.txt 2>&1 ;;
+            esac
+            echo "$S rc=$? core=$c" >> solvers_$c.log
           done
 
           end=$(( $(date +%s) + SEC + 40 ))
           while [ $(date +%s) -lt $end ]; do
             for f in sol_*.txt; do
               [ -s "$f" ] || continue
-              if grep -q "^s SATISFIABLE" "$f" 2>/dev/null; then
+              if grep -qE "^s SATISFIABLE|^SAT$" "$f" 2>/dev/null; then
                 if python3 tobits.py "$f" > solution.txt && python3 verify.py inst.cnf solution.txt; then
                   git config user.name solver
                   git config user.email solver@users.noreply.github.com
@@ -58,7 +70,7 @@ jobs:
                   git add solution.txt
                   git commit -m "solution $f"
                   git push origin "$B"
-                  pkill kissat; pkill cryptominisat5; pkill minisat
+                  pkill kissat; pkill cadical; pkill cryptominisat5; pkill minisat
                   echo "PUSHED $B"
                   exit 0
                 fi
@@ -67,4 +79,5 @@ jobs:
             sleep 3
           done
           echo "NO SOLUTION in $SEC s"
+          cat solvers_*.log 2>/dev/null | head -20
           for l in log_0.txt log_1.txt; do echo "--- $l"; tail -3 "$l" 2>/dev/null; done
