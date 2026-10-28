@@ -1,0 +1,86 @@
+name: exact
+on:
+  workflow_dispatch:
+    inputs:
+      instance: {description: "dir with gz parts p_*", required: true}
+      seconds: {description: "solver time", default: "1800"}
+      tag: {description: "run tag", required: true}
+permissions:
+  contents: write
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+    steps:
+      - uses: actions/checkout@v4
+      - name: assemble
+        run: |
+          cat ${{ inputs.instance }}/p_* | gunzip > raw.cnf
+          python3 - <<'EOP'
+          L=open("raw.cnf").read().split("\n")
+          n,m,K=map(int,L[0].split())
+          out=["p cnf %d %d"%(n,m)]
+          for l in L[1:m+1]:
+              if l.strip(): out.append(l.strip()+" 0")
+          open("inst.cnf","w").write("\n".join(out)+"\n")
+          EOP
+          head -1 inst.cnf
+      - name: install solvers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq kissat minisat cryptominisat
+      - name: run
+        run: |
+          N=$(nproc); echo "cores=$N job=${{ matrix.job }}"
+          SEC=${{ inputs.seconds }}
+          J=${{ matrix.job }}
+          for c in $(seq 0 $((N-1))); do
+            case $(( (J*N+c) % 4 )) in
+              0) timeout $SEC kissat -q --seed=$((J*13+c)) inst.cnf > sol_$c.txt 2> log_$c.txt ;;
+              1) timeout $SEC cryptominisat5 --verb 0 --random-seed $((J*17+c)) inst.cnf > sol_$c.txt 2> log_$c.txt ;;
+              2) timeout $SEC minisat -rnd-seed=$((J*19+c)) inst.cnf sol_$c.txt > log_$c.txt 2>&1 ;;
+              3) timeout $SEC kissat -q --sat --seed=$((J*23+c)) inst.cnf > sol_$c.txt 2> log_$c.txt ;;
+            esac
+            ( echo "rc=$?" ) > done_$c &
+          done
+          end=$(( $(date +%s) + SEC + 30 ))
+          while [ $(date +%s) -lt $end ]; do
+            for f in sol_*.txt; do
+              if [ -s "$f" ] && grep -q "^s SATISFIABLE" "$f" 2>/dev/null; then
+                python3 - "$f" <<'EOP'
+import sys
+f=sys.argv[1]; lines=open(f).read().split("\n")
+vals={}
+for l in lines:
+    if l.startswith("v "):
+        for x in l[2:].split():
+            i=int(x)
+            if i: vals[abs(i)] = "1" if i>0 else "0"
+n=max(vals) if vals else 0
+out="".join(vals.get(k,"0") for k in range(1,n+1))
+open("solution.txt","w").write(out+"\n")
+print("len",len(out))
+EOP
+                if python3 verify.py <(python3 -c "
+L=open('inst.cnf').read().split(chr(10))
+for i,l in enumerate(L[1:]):
+    if l.strip(): print(l)
+") solution.txt 2>/dev/null || python3 -c "
+L=[l for l in open('inst.cnf').read().split(chr(10))[1:] if l.strip()]
+a=open('solution.txt').read().strip()
+ok=all(any((int(x)>0)==(a[abs(int(x))-1]=='1') for x in l.split() if x!='0') for l in L)
+import sys; sys.exit(0 if ok else 1)
+"; then
+                  git config user.name solver; git config user.email s@users.noreply.github.com
+                  B="sol-${{ inputs.tag }}-$J"
+                  git checkout -b "$B"; git add solution.txt; git commit -m "solution"; git push origin "$B"
+                  pkill kissat; pkill cryptominisat5; pkill minisat; exit 0
+                fi
+              fi
+            done
+            sleep 3
+          done
+          echo "NO SOLUTION in $SEC s"; head -3 log_0.txt
